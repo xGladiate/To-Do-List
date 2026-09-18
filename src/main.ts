@@ -16,6 +16,7 @@ import {
 } from './tasks/taskGrouping.ts'
 import {
   completeTaskReward,
+  createInitialGameState,
   getRewardPoints,
   reopenTaskReward,
   synchronizeCompletedTasks,
@@ -23,6 +24,24 @@ import {
   type GrownTree,
 } from './game/gameState.ts'
 import { loadGameState, saveGameState } from './game/gameStorage.ts'
+import {
+  initializeCloudSync,
+  queueCloudSave,
+  type CloudStatus,
+} from './supabase/cloudSync.ts'
+import { isSupabaseConfigured } from './supabase/supabaseClient.ts'
+import {
+  createTaskNotificationController,
+  type TaskNotificationState,
+} from './notifications/taskNotifications.ts'
+import {
+  continueWithGoogle,
+  createEmailAccount,
+  getAccountState,
+  signInWithEmail,
+  signOut,
+  type AccountState,
+} from './auth/authService.ts'
 import { createTaskDialog } from './ui/taskDialog.ts'
 import { renderForest, renderProgressGarden } from './ui/progressGarden.ts'
 import { formatDueAt } from './utils/dateTime.ts'
@@ -35,11 +54,30 @@ if (app === null) {
 
 app.innerHTML = `
   <main class="app-shell">
-    <header class="app-header">
+    <header class="app-header app-header--with-tools">
       <div>
         <p class="eyebrow">Grow through what you do</p>
         <h1>My Tasks</h1>
         <p class="intro">Focus on what needs attention and grow a forest along the way.</p>
+      </div>
+      <div class="app-tools" aria-label="App services">
+        <button class="utility-button" id="notification-button" type="button">
+          <svg class="utility-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+          </svg>
+          <span id="notification-button-label">Enable reminders</span>
+        </button>
+        <button class="utility-button" id="account-button" type="button">
+          <svg class="utility-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="8" r="4" />
+            <path d="M4 21a8 8 0 0 1 16 0" />
+          </svg>
+          <span id="account-button-label">Sign in</span>
+        </button>
+        <span class="sync-status" id="sync-status" data-status="local" role="status">
+          <span aria-hidden="true"></span>
+          <span id="sync-status-label">Local only</span>
+        </span>
       </div>
     </header>
 
@@ -94,6 +132,44 @@ app.innerHTML = `
       <div id="forest-content"></div>
     </div>
   </dialog>
+
+  <dialog class="task-dialog account-dialog" id="account-dialog" aria-labelledby="account-dialog-title">
+    <div class="dialog-card">
+      <div class="dialog-header">
+        <div>
+          <p class="dialog-eyebrow">Cloud account</p>
+          <h2 id="account-dialog-title">Account</h2>
+        </div>
+        <button class="dialog-close account-dialog-close" type="button" aria-label="Close account settings">×</button>
+      </div>
+
+      <div class="account-summary" id="account-summary"></div>
+
+      <form class="dialog-form account-form" id="account-form">
+        <div class="field-stack">
+          <label for="account-email">Email</label>
+          <input id="account-email" name="email" type="email" autocomplete="email" required />
+        </div>
+        <div class="field-stack">
+          <label for="account-password">Password</label>
+          <input id="account-password" name="password" type="password" autocomplete="current-password" minlength="6" required />
+        </div>
+        <div class="dialog-actions account-email-actions">
+          <button class="small-button small-button--secondary" id="create-account-button" type="button">Create account</button>
+          <button class="small-button" type="submit">Sign in</button>
+        </div>
+      </form>
+
+      <div class="account-divider" id="account-divider"><span>or</span></div>
+      <button class="google-button" id="google-auth-button" type="button">
+        <span class="google-mark" aria-hidden="true">G</span>
+        Continue with Google
+      </button>
+
+      <p class="account-message" id="account-message" role="status" aria-live="polite"></p>
+      <button class="small-button small-button--secondary account-signout" id="sign-out-button" type="button" hidden>Sign out</button>
+    </div>
+  </dialog>
 `
 
 const addTaskButton = document.querySelector<HTMLButtonElement>('#add-task-button')!
@@ -110,17 +186,130 @@ const completedTabCount = document.querySelector<HTMLSpanElement>('#completed-ta
 const forestDialog = document.querySelector<HTMLDialogElement>('#forest-dialog')!
 const forestContent = document.querySelector<HTMLDivElement>('#forest-content')!
 const forestCloseButton = document.querySelector<HTMLButtonElement>('.forest-dialog-close')!
+const notificationButton = document.querySelector<HTMLButtonElement>('#notification-button')!
+const notificationButtonLabel = document.querySelector<HTMLSpanElement>('#notification-button-label')!
+const accountButton = document.querySelector<HTMLButtonElement>('#account-button')!
+const accountButtonLabel = document.querySelector<HTMLSpanElement>('#account-button-label')!
+const syncStatus = document.querySelector<HTMLSpanElement>('#sync-status')!
+const syncStatusLabel = document.querySelector<HTMLSpanElement>('#sync-status-label')!
 const viewButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-view]'))
+const accountDialog = document.querySelector<HTMLDialogElement>('#account-dialog')!
+const accountCloseButton = document.querySelector<HTMLButtonElement>('.account-dialog-close')!
+const accountSummary = document.querySelector<HTMLDivElement>('#account-summary')!
+const accountForm = document.querySelector<HTMLFormElement>('#account-form')!
+const accountEmail = document.querySelector<HTMLInputElement>('#account-email')!
+const accountPassword = document.querySelector<HTMLInputElement>('#account-password')!
+const createAccountButton = document.querySelector<HTMLButtonElement>('#create-account-button')!
+const googleAuthButton = document.querySelector<HTMLButtonElement>('#google-auth-button')!
+const accountDivider = document.querySelector<HTMLDivElement>('#account-divider')!
+const accountMessage = document.querySelector<HTMLParagraphElement>('#account-message')!
+const signOutButton = document.querySelector<HTMLButtonElement>('#sign-out-button')!
 
 let tasks = loadTasks()
 let gameState = loadGameState()
 let activeView: TaskView = 'todo'
 let searchQuery = ''
 let toastTimer: number | undefined
+let accountState: AccountState = {
+  configured: isSupabaseConfigured,
+  user: null,
+  anonymous: true,
+  email: null,
+  googleLinked: false,
+}
 
 const initialGameUpdate = synchronizeCompletedTasks(gameState, tasks)
 gameState = initialGameUpdate.state
 saveGameState(gameState)
+
+const taskNotifications = createTaskNotificationController(
+  () => tasks,
+  updateNotificationButton,
+)
+
+function updateNotificationButton(state: TaskNotificationState): void {
+  notificationButton.dataset.state = state.enabled ? 'enabled' : state.permission
+
+  if (!state.supported) {
+    notificationButtonLabel.textContent = 'Reminders unavailable'
+    notificationButton.disabled = true
+    notificationButton.title = 'This browser does not support web notifications.'
+  } else if (state.permission === 'denied') {
+    notificationButtonLabel.textContent = 'Notifications blocked'
+    notificationButton.title = 'Allow notifications for this site in Chrome settings, then reload.'
+  } else if (state.enabled) {
+    notificationButtonLabel.textContent = 'Reminders on'
+    notificationButton.title = 'Chrome reminders are enabled. Click to turn them off.'
+  } else if (state.permission === 'granted') {
+    notificationButtonLabel.textContent = 'Reminders off'
+    notificationButton.title = 'Click to turn due-task reminders on.'
+  } else {
+    notificationButtonLabel.textContent = 'Enable reminders'
+    notificationButton.title = 'Get a Chrome notification 15 minutes before a task is due.'
+  }
+}
+
+function updateCloudStatus(status: CloudStatus, message?: string): void {
+  const labels: Record<CloudStatus, string> = {
+    local: 'Local only',
+    connecting: 'Connecting…',
+    synced: 'Cloud synced',
+    saving: 'Saving…',
+    error: 'Sync paused',
+  }
+
+  syncStatus.dataset.status = status
+  syncStatusLabel.textContent = labels[status]
+  syncStatus.title =
+    message ??
+    (status === 'local'
+      ? 'Add Supabase values to .env.local to enable cloud sync.'
+      : 'Supabase keeps tasks and garden progress backed up.')
+}
+
+function setAccountMessage(message: string, isError = false): void {
+  accountMessage.textContent = message
+  accountMessage.classList.toggle('account-message--error', isError)
+}
+
+function renderAccountState(): void {
+  const hasPermanentAccount = accountState.user !== null && !accountState.anonymous
+  accountButtonLabel.textContent = hasPermanentAccount
+    ? accountState.email ?? 'Account'
+    : 'Sign in'
+
+  accountSummary.replaceChildren()
+  const summaryTitle = document.createElement('strong')
+  const summaryCopy = document.createElement('p')
+
+  if (!accountState.configured) {
+    summaryTitle.textContent = 'Supabase setup required'
+    summaryCopy.textContent = 'Add the project URL and publishable key to .env.local first.'
+  } else if (hasPermanentAccount) {
+    summaryTitle.textContent = accountState.email ?? 'Signed in'
+    summaryCopy.textContent = 'Your tasks and garden can sync through this account.'
+  } else {
+    summaryTitle.textContent = 'Guest mode'
+    summaryCopy.textContent = 'Create an account or continue with Google to keep this data recoverable.'
+  }
+
+  accountSummary.append(summaryTitle, summaryCopy)
+
+  const showEmailForm = accountState.configured && !hasPermanentAccount
+  accountForm.hidden = !showEmailForm
+  accountDivider.hidden = !accountState.configured || accountState.googleLinked
+  googleAuthButton.hidden = !accountState.configured || accountState.googleLinked
+  googleAuthButton.textContent = hasPermanentAccount
+    ? 'Link Google account'
+    : 'Continue with Google'
+  googleAuthButton.disabled = !accountState.configured
+  signOutButton.hidden = !hasPermanentAccount
+}
+
+async function refreshAccountState(): Promise<void> {
+  accountState = await getAccountState()
+  renderAccountState()
+}
 
 function openForest(): void {
   renderForest(forestContent, gameState)
@@ -158,11 +347,14 @@ function persistAndRender(): void {
   saveTasks(tasks)
   saveGameState(gameState)
   renderApp()
+  queueCloudSave(tasks, gameState, updateCloudStatus)
+  void taskNotifications.checkNow()
 }
 
 const taskDialog = createTaskDialog(({ taskId, details }) => {
   if (taskId === null) {
-    tasks = [createTask(details), ...tasks]
+    const newTask = createTask(details)
+    tasks = [newTask, ...tasks]
   } else {
     tasks = updateTask(tasks, taskId, details)
   }
@@ -360,4 +552,101 @@ forestDialog.addEventListener('click', (event) => {
   if (event.target === forestDialog) closeForest()
 })
 
+notificationButton.addEventListener('click', () => {
+  void taskNotifications.toggle()
+})
+
+accountButton.addEventListener('click', () => {
+  setAccountMessage('')
+  renderAccountState()
+  accountDialog.showModal()
+  void refreshAccountState()
+})
+
+accountCloseButton.addEventListener('click', () => accountDialog.close())
+accountDialog.addEventListener('click', (event) => {
+  if (event.target === accountDialog) accountDialog.close()
+})
+
+accountForm.addEventListener('submit', (event) => {
+  event.preventDefault()
+  setAccountMessage('Signing in…')
+
+  void signInWithEmail(accountEmail.value.trim(), accountPassword.value)
+    .then(async () => {
+      accountDialog.close()
+      await startCloudSync()
+    })
+    .catch((error: unknown) => {
+      setAccountMessage(error instanceof Error ? error.message : 'Sign-in failed.', true)
+    })
+})
+
+createAccountButton.addEventListener('click', () => {
+  if (!accountForm.reportValidity()) return
+  setAccountMessage('Creating account…')
+
+  void createEmailAccount(accountEmail.value.trim(), accountPassword.value)
+    .then(async (message) => {
+      setAccountMessage(message)
+      await refreshAccountState()
+    })
+    .catch((error: unknown) => {
+      setAccountMessage(error instanceof Error ? error.message : 'Account creation failed.', true)
+    })
+})
+
+googleAuthButton.addEventListener('click', () => {
+  setAccountMessage('Opening Google…')
+  const shouldLink = accountState.user !== null && !accountState.googleLinked
+
+  void continueWithGoogle(shouldLink).catch((error: unknown) => {
+    setAccountMessage(error instanceof Error ? error.message : 'Google sign-in failed.', true)
+  })
+})
+
+signOutButton.addEventListener('click', () => {
+  setAccountMessage('Signing out…')
+  void signOut()
+    .then(async () => {
+      tasks = []
+      gameState = createInitialGameState()
+      saveTasks(tasks)
+      saveGameState(gameState)
+      renderApp()
+      accountDialog.close()
+      await startCloudSync()
+    })
+    .catch((error: unknown) => {
+      setAccountMessage(error instanceof Error ? error.message : 'Could not sign out.', true)
+    })
+})
+
+async function startCloudSync(): Promise<void> {
+  if (!isSupabaseConfigured) {
+    updateCloudStatus('local')
+    await refreshAccountState()
+    return
+  }
+
+  updateCloudStatus('connecting')
+  const cloudState = await initializeCloudSync(tasks, gameState)
+
+  if (!cloudState.connected) {
+    updateCloudStatus('error', cloudState.message)
+    await refreshAccountState()
+    return
+  }
+
+  tasks = cloudState.tasks
+  gameState = synchronizeCompletedTasks(cloudState.gameState, tasks).state
+  saveTasks(tasks)
+  saveGameState(gameState)
+  renderApp()
+  updateCloudStatus('synced')
+  queueCloudSave(tasks, gameState, updateCloudStatus)
+  await refreshAccountState()
+}
+
 renderApp()
+void startCloudSync()

@@ -1,7 +1,9 @@
 import type { Task, TaskPriority } from '../models/task.ts'
 import { dateOnlyToEndOfDayIso } from '../utils/dateTime.ts'
 
-const STORAGE_KEY = 'todo.tasks.v3'
+const STORAGE_KEY = 'todo.tasks.v5'
+const V4_STORAGE_KEY = 'todo.tasks.v4'
+const V3_STORAGE_KEY = 'todo.tasks.v3'
 const V2_STORAGE_KEY = 'todo.tasks.v2'
 const V1_STORAGE_KEY = 'todo.tasks.v1'
 
@@ -35,13 +37,17 @@ function hasV2Fields(value: unknown): value is Record<string, unknown> {
   )
 }
 
-function isTask(value: unknown): value is Task {
+function hasV3Fields(value: unknown): value is Record<string, unknown> {
   return (
     hasBaseTaskFields(value) &&
     typeof value.description === 'string' &&
     (typeof value.dueAt === 'string' || value.dueAt === null) &&
     isPriority(value.priority)
   )
+}
+
+function isTask(value: unknown): value is Task {
+  return hasV3Fields(value)
 }
 
 function parseTaskArray(storedTasks: string): unknown[] {
@@ -85,11 +91,43 @@ function migrateV1Tasks(storedTasks: string): Task[] {
     }))
 }
 
+function migrateV3Tasks(storedTasks: string): Task[] {
+  return parseTaskArray(storedTasks)
+    .filter(hasV3Fields)
+    .map((task) => ({
+      id: task.id as string,
+      title: task.title as string,
+      description: task.description as string,
+      completed: task.completed as boolean,
+      dueAt: task.dueAt as string | null,
+      priority: task.priority as TaskPriority,
+      createdAt: task.createdAt as string,
+      updatedAt: task.updatedAt as string,
+      completedAt: task.completedAt as string | null,
+    }))
+}
+
 export function loadTasks(): Task[] {
   const storedTasks = localStorage.getItem(STORAGE_KEY)
 
   if (storedTasks !== null) {
     return parseTaskArray(storedTasks).filter(isTask)
+  }
+
+  const v4Tasks = localStorage.getItem(V4_STORAGE_KEY)
+
+  if (v4Tasks !== null) {
+    const migratedTasks = migrateV3Tasks(v4Tasks)
+    saveTasks(migratedTasks)
+    return migratedTasks
+  }
+
+  const v3Tasks = localStorage.getItem(V3_STORAGE_KEY)
+
+  if (v3Tasks !== null) {
+    const migratedTasks = migrateV3Tasks(v3Tasks)
+    saveTasks(migratedTasks)
+    return migratedTasks
   }
 
   const v2Tasks = localStorage.getItem(V2_STORAGE_KEY)

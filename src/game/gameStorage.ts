@@ -28,6 +28,10 @@ function isGameState(value: unknown): value is GameState {
   )
 }
 
+export function parseGameState(value: unknown): GameState | null {
+  return isGameState(value) ? value : null
+}
+
 export function loadGameState(): GameState {
   const storedState = localStorage.getItem(STORAGE_KEY)
 
@@ -35,7 +39,7 @@ export function loadGameState(): GameState {
 
   try {
     const parsedState: unknown = JSON.parse(storedState)
-    return isGameState(parsedState) ? parsedState : createInitialGameState()
+    return parseGameState(parsedState) ?? createInitialGameState()
   } catch {
     return createInitialGameState()
   }

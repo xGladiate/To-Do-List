@@ -32,9 +32,13 @@ site data will remove them.
 ## Features
 
 - Add tasks
-- Edit task titles
+- Add an optional description and due date
+- Assign low, medium, or high priority
+- Edit all task details
 - Mark tasks as complete or active
 - Delete tasks
+- Search task titles and descriptions
+- Filter by all, active, or completed tasks
 - Persist tasks in browser local storage
 
 ## Available commands
@@ -48,6 +52,7 @@ site data will remove them.
 - `src/main.ts` is the browser entry point.
 - `src/models/task.ts` defines the task data shape.
 - `src/storage/taskStorage.ts` owns browser persistence.
+- `src/tasks/taskOperations.ts` contains task creation, updates, filtering, and search.
 - `src/style.css` contains the application styles.
 
 ## Production build

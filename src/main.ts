@@ -37,6 +37,7 @@ import {
 import {
   continueWithGoogle,
   createEmailAccount,
+  getAuthErrorMessage,
   getAccountState,
   signInWithEmail,
   signOut,
@@ -74,10 +75,6 @@ app.innerHTML = `
           </svg>
           <span id="account-button-label">Sign in</span>
         </button>
-        <span class="sync-status" id="sync-status" data-status="local" role="status">
-          <span aria-hidden="true"></span>
-          <span id="sync-status-label">Local only</span>
-        </span>
       </div>
     </header>
 
@@ -156,7 +153,7 @@ app.innerHTML = `
         </div>
         <div class="dialog-actions account-email-actions">
           <button class="small-button small-button--secondary" id="create-account-button" type="button">Create account</button>
-          <button class="small-button" type="submit">Sign in</button>
+          <button class="small-button" id="sign-in-button" type="submit">Sign in</button>
         </div>
       </form>
 
@@ -190,8 +187,6 @@ const notificationButton = document.querySelector<HTMLButtonElement>('#notificat
 const notificationButtonLabel = document.querySelector<HTMLSpanElement>('#notification-button-label')!
 const accountButton = document.querySelector<HTMLButtonElement>('#account-button')!
 const accountButtonLabel = document.querySelector<HTMLSpanElement>('#account-button-label')!
-const syncStatus = document.querySelector<HTMLSpanElement>('#sync-status')!
-const syncStatusLabel = document.querySelector<HTMLSpanElement>('#sync-status-label')!
 const viewButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-view]'))
 const accountDialog = document.querySelector<HTMLDialogElement>('#account-dialog')!
 const accountCloseButton = document.querySelector<HTMLButtonElement>('.account-dialog-close')!
@@ -200,6 +195,7 @@ const accountForm = document.querySelector<HTMLFormElement>('#account-form')!
 const accountEmail = document.querySelector<HTMLInputElement>('#account-email')!
 const accountPassword = document.querySelector<HTMLInputElement>('#account-password')!
 const createAccountButton = document.querySelector<HTMLButtonElement>('#create-account-button')!
+const signInButton = document.querySelector<HTMLButtonElement>('#sign-in-button')!
 const googleAuthButton = document.querySelector<HTMLButtonElement>('#google-auth-button')!
 const accountDivider = document.querySelector<HTMLDivElement>('#account-divider')!
 const accountMessage = document.querySelector<HTMLParagraphElement>('#account-message')!
@@ -210,6 +206,8 @@ let gameState = loadGameState()
 let activeView: TaskView = 'todo'
 let searchQuery = ''
 let toastTimer: number | undefined
+let cloudStatus: CloudStatus = 'local'
+let cloudStatusMessage: string | undefined
 let accountState: AccountState = {
   configured: isSupabaseConfigured,
   user: null,
@@ -250,26 +248,23 @@ function updateNotificationButton(state: TaskNotificationState): void {
 }
 
 function updateCloudStatus(status: CloudStatus, message?: string): void {
-  const labels: Record<CloudStatus, string> = {
-    local: 'Local only',
-    connecting: 'Connecting…',
-    synced: 'Cloud synced',
-    saving: 'Saving…',
-    error: 'Sync paused',
-  }
-
-  syncStatus.dataset.status = status
-  syncStatusLabel.textContent = labels[status]
-  syncStatus.title =
-    message ??
-    (status === 'local'
-      ? 'Add Supabase values to .env.local to enable cloud sync.'
-      : 'Supabase keeps tasks and garden progress backed up.')
+  cloudStatus = status
+  cloudStatusMessage = message
+  if (accountDialog.open) renderAccountState()
 }
 
 function setAccountMessage(message: string, isError = false): void {
   accountMessage.textContent = message
   accountMessage.classList.toggle('account-message--error', isError)
+}
+
+function setAuthBusy(busy: boolean): void {
+  accountEmail.disabled = busy
+  accountPassword.disabled = busy
+  createAccountButton.disabled = busy
+  signInButton.disabled = busy
+  googleAuthButton.disabled = busy || !accountState.configured
+  signOutButton.disabled = busy
 }
 
 function renderAccountState(): void {
@@ -287,10 +282,14 @@ function renderAccountState(): void {
     summaryCopy.textContent = 'Add the project URL and publishable key to .env.local first.'
   } else if (hasPermanentAccount) {
     summaryTitle.textContent = accountState.email ?? 'Signed in'
-    summaryCopy.textContent = 'Your tasks and garden can sync through this account.'
+    summaryCopy.textContent = cloudStatus === 'error'
+      ? `Signed in, but Supabase sync is paused${cloudStatusMessage ? `: ${cloudStatusMessage}` : '.'}`
+      : cloudStatus === 'connecting' || cloudStatus === 'saving'
+        ? 'Connected to Supabase. Synchronizing your tasks and garden…'
+        : 'Connected to Supabase. Your tasks and garden are synchronized through this account.'
   } else {
-    summaryTitle.textContent = 'Guest mode'
-    summaryCopy.textContent = 'Create an account or continue with Google to keep this data recoverable.'
+    summaryTitle.textContent = 'Signed out'
+    summaryCopy.textContent = 'Tasks stay on this device until you sign in with Supabase.'
   }
 
   accountSummary.append(summaryTitle, summaryCopy)
@@ -568,58 +567,69 @@ accountDialog.addEventListener('click', (event) => {
   if (event.target === accountDialog) accountDialog.close()
 })
 
-accountForm.addEventListener('submit', (event) => {
+accountForm.addEventListener('submit', async (event) => {
   event.preventDefault()
   setAccountMessage('Signing in…')
+  setAuthBusy(true)
 
-  void signInWithEmail(accountEmail.value.trim(), accountPassword.value)
-    .then(async () => {
-      accountDialog.close()
-      await startCloudSync()
-    })
-    .catch((error: unknown) => {
-      setAccountMessage(error instanceof Error ? error.message : 'Sign-in failed.', true)
-    })
+  try {
+    await signInWithEmail(accountEmail.value.trim(), accountPassword.value)
+    accountDialog.close()
+    await startCloudSync()
+  } catch (error: unknown) {
+    setAccountMessage(getAuthErrorMessage(error, 'Sign-in failed.'), true)
+  } finally {
+    setAuthBusy(false)
+  }
 })
 
-createAccountButton.addEventListener('click', () => {
+createAccountButton.addEventListener('click', async () => {
   if (!accountForm.reportValidity()) return
   setAccountMessage('Creating account…')
+  setAuthBusy(true)
 
-  void createEmailAccount(accountEmail.value.trim(), accountPassword.value)
-    .then(async (message) => {
-      setAccountMessage(message)
-      await refreshAccountState()
-    })
-    .catch((error: unknown) => {
-      setAccountMessage(error instanceof Error ? error.message : 'Account creation failed.', true)
-    })
+  try {
+    const message = await createEmailAccount(accountEmail.value.trim(), accountPassword.value)
+    setAccountMessage(message)
+    await refreshAccountState()
+  } catch (error: unknown) {
+    setAccountMessage(getAuthErrorMessage(error, 'Account creation failed.'), true)
+  } finally {
+    setAuthBusy(false)
+  }
 })
 
-googleAuthButton.addEventListener('click', () => {
+googleAuthButton.addEventListener('click', async () => {
   setAccountMessage('Opening Google…')
-  const shouldLink = accountState.user !== null && !accountState.googleLinked
+  setAuthBusy(true)
+  const shouldLink = accountState.user !== null && !accountState.anonymous && !accountState.googleLinked
 
-  void continueWithGoogle(shouldLink).catch((error: unknown) => {
-    setAccountMessage(error instanceof Error ? error.message : 'Google sign-in failed.', true)
-  })
+  try {
+    await continueWithGoogle(shouldLink)
+  } catch (error: unknown) {
+    setAccountMessage(getAuthErrorMessage(error, 'Google sign-in failed.'), true)
+    setAuthBusy(false)
+  }
 })
 
-signOutButton.addEventListener('click', () => {
+signOutButton.addEventListener('click', async () => {
   setAccountMessage('Signing out…')
-  void signOut()
-    .then(async () => {
-      tasks = []
-      gameState = createInitialGameState()
-      saveTasks(tasks)
-      saveGameState(gameState)
-      renderApp()
-      accountDialog.close()
-      await startCloudSync()
-    })
-    .catch((error: unknown) => {
-      setAccountMessage(error instanceof Error ? error.message : 'Could not sign out.', true)
-    })
+  setAuthBusy(true)
+
+  try {
+    await signOut()
+    tasks = []
+    gameState = createInitialGameState()
+    saveTasks(tasks)
+    saveGameState(gameState)
+    renderApp()
+    accountDialog.close()
+    await startCloudSync()
+  } catch (error: unknown) {
+    setAccountMessage(getAuthErrorMessage(error, 'Could not sign out.'), true)
+  } finally {
+    setAuthBusy(false)
+  }
 })
 
 async function startCloudSync(): Promise<void> {
@@ -633,7 +643,7 @@ async function startCloudSync(): Promise<void> {
   const cloudState = await initializeCloudSync(tasks, gameState)
 
   if (!cloudState.connected) {
-    updateCloudStatus('error', cloudState.message)
+    updateCloudStatus(cloudState.message ? 'error' : 'local', cloudState.message)
     await refreshAccountState()
     return
   }

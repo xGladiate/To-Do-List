@@ -1,4 +1,4 @@
-import type { User } from '@supabase/supabase-js'
+import { isAuthApiError, type User } from '@supabase/supabase-js'
 import { supabase } from '../supabase/supabaseClient.ts'
 
 export type AccountState = {
@@ -68,4 +68,30 @@ export async function signOut(): Promise<void> {
   if (supabase === null) return
   const { error } = await supabase.auth.signOut()
   if (error !== null) throw error
+}
+
+export function getAuthErrorMessage(error: unknown, fallback: string): string {
+  if (isAuthApiError(error)) {
+    if (error.code === 'over_email_send_rate_limit') {
+      return 'The Supabase test-email limit was reached. Wait before trying again, or configure custom SMTP for higher limits.'
+    }
+
+    if (error.code === 'over_request_rate_limit' || error.status === 429) {
+      return 'Too many authentication attempts were made. Wait a few minutes before trying again.'
+    }
+
+    if (error.code === 'invalid_credentials') {
+      return 'The email or password is incorrect.'
+    }
+
+    if (error.code === 'email_not_confirmed') {
+      return 'Confirm your email address before signing in.'
+    }
+
+    if (error.code === 'manual_linking_disabled') {
+      return 'Enable manual identity linking in Supabase Authentication settings before linking Google to this account.'
+    }
+  }
+
+  return error instanceof Error ? error.message : fallback
 }

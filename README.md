@@ -87,11 +87,14 @@ change from **Local only** to **Cloud synced** when the connection succeeds.
 
 ### Current sync behavior
 
-The app signs in anonymously, so every browser profile receives its own private
-Supabase user ID. If that user's cloud tables are empty, existing local tasks
-and garden progress are uploaded. If cloud state already exists, it becomes the
-local state. Later, anonymous accounts can be upgraded to email or OAuth login
-for dependable cross-device access.
+While signed out, tasks and garden progress stay in browser local storage. Once
+the user signs in with email/password or Google, the app uses that Supabase
+account for cloud synchronization. It does not automatically create anonymous
+Supabase users, avoiding unnecessary anonymous-auth requests and rate limits.
+
+Supabase's built-in email service is intended for testing and currently permits
+only a small number of authentication emails. Configure custom SMTP under
+Supabase Authentication settings before using email signup in production.
 
 ## Login setup
 

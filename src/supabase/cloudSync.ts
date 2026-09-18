@@ -95,15 +95,12 @@ export async function initializeCloudSync(
 
     if (sessionError !== null) throw sessionError
 
-    let user = sessionData.session?.user ?? null
+    const user = sessionData.session?.user ?? null
 
-    if (user === null) {
-      const { data: signInData, error: signInError } = await supabase.auth.signInAnonymously()
-      if (signInError !== null) throw signInError
-      user = signInData.user
+    if (user === null || user.is_anonymous) {
+      connectedUserId = null
+      return { connected: false, tasks: localTasks, gameState: localGameState }
     }
-
-    if (user === null) throw new Error('Supabase did not return a user session.')
 
     connectedUserId = user.id
 

@@ -1,9 +1,9 @@
-import type { Task, TaskFilter, TaskPriority } from '../models/task.ts'
+import type { Task, TaskPriority, TaskView } from '../models/task.ts'
 
 export type TaskDetails = {
   title: string
   description: string
-  dueDate: string | null
+  dueAt: string | null
   priority: TaskPriority
 }
 
@@ -15,7 +15,7 @@ export function createTask(details: TaskDetails): Task {
     title: details.title.trim(),
     description: details.description.trim(),
     completed: false,
-    dueDate: details.dueDate || null,
+    dueAt: details.dueAt || null,
     priority: details.priority,
     createdAt: now,
     updatedAt: now,
@@ -30,7 +30,7 @@ export function updateTask(tasks: Task[], taskId: string, details: TaskDetails):
           ...task,
           title: details.title.trim(),
           description: details.description.trim(),
-          dueDate: details.dueDate || null,
+          dueAt: details.dueAt || null,
           priority: details.priority,
           updatedAt: new Date().toISOString(),
         }
@@ -61,14 +61,11 @@ export function deleteTask(tasks: Task[], taskId: string): Task[] {
   return tasks.filter((task) => task.id !== taskId)
 }
 
-export function filterTasks(tasks: Task[], filter: TaskFilter, searchQuery: string): Task[] {
+export function filterTasks(tasks: Task[], view: TaskView, searchQuery: string): Task[] {
   const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
 
   return tasks.filter((task) => {
-    const matchesStatus =
-      filter === 'all' ||
-      (filter === 'active' && !task.completed) ||
-      (filter === 'completed' && task.completed)
+    const matchesStatus = view === 'todo' ? !task.completed : task.completed
 
     const searchableText = `${task.title} ${task.description}`.toLocaleLowerCase()
     const matchesSearch = normalizedQuery === '' || searchableText.includes(normalizedQuery)

@@ -1,7 +1,9 @@
 import type { Task, TaskPriority } from '../models/task.ts'
+import { dateOnlyToEndOfDayIso } from '../utils/dateTime.ts'
 
-const STORAGE_KEY = 'todo.tasks.v2'
-const LEGACY_STORAGE_KEY = 'todo.tasks.v1'
+const STORAGE_KEY = 'todo.tasks.v3'
+const V2_STORAGE_KEY = 'todo.tasks.v2'
+const V1_STORAGE_KEY = 'todo.tasks.v1'
 
 function isPriority(value: unknown): value is TaskPriority {
   return value === 'low' || value === 'medium' || value === 'high'
@@ -24,14 +26,20 @@ function hasBaseTaskFields(value: unknown): value is Record<string, unknown> {
   )
 }
 
-function isTask(value: unknown): value is Task {
-  if (!hasBaseTaskFields(value)) {
-    return false
-  }
-
+function hasV2Fields(value: unknown): value is Record<string, unknown> {
   return (
+    hasBaseTaskFields(value) &&
     typeof value.description === 'string' &&
     (typeof value.dueDate === 'string' || value.dueDate === null) &&
+    isPriority(value.priority)
+  )
+}
+
+function isTask(value: unknown): value is Task {
+  return (
+    hasBaseTaskFields(value) &&
+    typeof value.description === 'string' &&
+    (typeof value.dueAt === 'string' || value.dueAt === null) &&
     isPriority(value.priority)
   )
 }
@@ -45,7 +53,23 @@ function parseTaskArray(storedTasks: string): unknown[] {
   }
 }
 
-function migrateLegacyTasks(storedTasks: string): Task[] {
+function migrateV2Tasks(storedTasks: string): Task[] {
+  return parseTaskArray(storedTasks)
+    .filter(hasV2Fields)
+    .map((task) => ({
+      id: task.id as string,
+      title: task.title as string,
+      description: task.description as string,
+      completed: task.completed as boolean,
+      dueAt: typeof task.dueDate === 'string' ? dateOnlyToEndOfDayIso(task.dueDate) : null,
+      priority: task.priority as TaskPriority,
+      createdAt: task.createdAt as string,
+      updatedAt: task.updatedAt as string,
+      completedAt: task.completedAt as string | null,
+    }))
+}
+
+function migrateV1Tasks(storedTasks: string): Task[] {
   return parseTaskArray(storedTasks)
     .filter(hasBaseTaskFields)
     .map((task) => ({
@@ -53,7 +77,7 @@ function migrateLegacyTasks(storedTasks: string): Task[] {
       title: task.title as string,
       description: '',
       completed: task.completed as boolean,
-      dueDate: null,
+      dueAt: null,
       priority: 'medium',
       createdAt: task.createdAt as string,
       updatedAt: task.updatedAt as string,
@@ -68,13 +92,21 @@ export function loadTasks(): Task[] {
     return parseTaskArray(storedTasks).filter(isTask)
   }
 
-  const legacyTasks = localStorage.getItem(LEGACY_STORAGE_KEY)
+  const v2Tasks = localStorage.getItem(V2_STORAGE_KEY)
 
-  if (legacyTasks === null) {
+  if (v2Tasks !== null) {
+    const migratedTasks = migrateV2Tasks(v2Tasks)
+    saveTasks(migratedTasks)
+    return migratedTasks
+  }
+
+  const v1Tasks = localStorage.getItem(V1_STORAGE_KEY)
+
+  if (v1Tasks === null) {
     return []
   }
 
-  const migratedTasks = migrateLegacyTasks(legacyTasks)
+  const migratedTasks = migrateV1Tasks(v1Tasks)
   saveTasks(migratedTasks)
   return migratedTasks
 }

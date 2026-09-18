@@ -32,14 +32,23 @@ site data will remove them.
 ## Features
 
 - Add tasks
-- Add an optional description and due date
+- Add an optional description, due date, and due time
 - Assign low, medium, or high priority
+- Add and edit tasks in a focused pop-up dialog
 - Edit all task details
 - Mark tasks as complete or active
 - Delete tasks
 - Search task titles and descriptions
-- Filter by all, active, or completed tasks
+- Start in a focused **To do** view, with a separate completed-task history
+- Group active work into Overdue, Today, Upcoming, and Anytime
+- Sort each group by priority and then deadline
+- Earn growth points when tasks are completed: low `+5`, medium `+10`, high `+20`
+- Grow a visible tree through seed, sprout, young tree, and growing-tree stages
+- Plant every fully grown tree in a permanent forest collection
+- Receive a different species from a shuffled, no-repeat seed bag
+- Track trees grown, tasks completed this week, and tasks due today
 - Persist tasks in browser local storage
+- Persist garden progress separately in browser local storage
 
 ## Available commands
 
@@ -53,7 +62,15 @@ site data will remove them.
 - `src/models/task.ts` defines the task data shape.
 - `src/storage/taskStorage.ts` owns browser persistence.
 - `src/tasks/taskOperations.ts` contains task creation, updates, filtering, and search.
+- `src/tasks/taskGrouping.ts` groups and orders tasks by urgency.
+- `src/game/gameState.ts` contains the point, seed-bag, and forest rules.
+- `src/game/gameStorage.ts` persists garden progress independently of tasks.
+- `src/ui/taskDialog.ts` manages the shared add/edit dialog.
+- `src/ui/progressGarden.ts` renders the progress card and forest collection.
+- `src/ui/treeIllustration.ts` renders the tree species and growth stages.
+- `src/utils/dateTime.ts` converts and formats task deadlines.
 - `src/style.css` contains the application styles.
+- `public/assets/garden-clearing.png` is the generated garden backdrop.
 
 ## Production build
 

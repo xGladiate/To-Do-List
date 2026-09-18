@@ -1,5 +1,5 @@
 import './style.css'
-import type { Task, TaskFilter, TaskPriority } from './models/task.ts'
+import type { Task, TaskView } from './models/task.ts'
 import { loadTasks, saveTasks } from './storage/taskStorage.ts'
 import {
   createTask,
@@ -8,6 +8,24 @@ import {
   toggleTask,
   updateTask,
 } from './tasks/taskOperations.ts'
+import {
+  countCompletedThisWeek,
+  countDueToday,
+  groupActiveTasks,
+  sortCompletedTasks,
+} from './tasks/taskGrouping.ts'
+import {
+  completeTaskReward,
+  getRewardPoints,
+  reopenTaskReward,
+  synchronizeCompletedTasks,
+  TREE_LABELS,
+  type GrownTree,
+} from './game/gameState.ts'
+import { loadGameState, saveGameState } from './game/gameStorage.ts'
+import { createTaskDialog } from './ui/taskDialog.ts'
+import { renderForest, renderProgressGarden } from './ui/progressGarden.ts'
+import { formatDueAt } from './utils/dateTime.ts'
 
 const app = document.querySelector<HTMLDivElement>('#app')
 
@@ -18,148 +36,157 @@ if (app === null) {
 app.innerHTML = `
   <main class="app-shell">
     <header class="app-header">
-      <p class="eyebrow">Local-first task manager</p>
-      <h1>My Tasks</h1>
-      <p class="intro">Keep track of what matters. Your tasks stay in this browser.</p>
+      <div>
+        <p class="eyebrow">Grow through what you do</p>
+        <h1>My Tasks</h1>
+        <p class="intro">Focus on what needs attention and grow a forest along the way.</p>
+      </div>
     </header>
 
+    <section class="garden-panel" id="garden-panel" aria-label="Garden progress"></section>
+
     <section class="task-panel" aria-labelledby="task-list-title">
-      <form class="task-form" id="task-form">
-        <div class="field-stack">
-          <label for="task-input">Task title</label>
-          <input
-            id="task-input"
-            name="title"
-            type="text"
-            placeholder="What needs to be done?"
-            maxlength="200"
-            autocomplete="off"
-            required
-          />
+      <div class="task-section-header">
+        <div>
+          <h2 id="task-list-title">Tasks to act on</h2>
+          <p id="task-count" aria-live="polite"></p>
         </div>
-
-        <div class="field-stack">
-          <label for="task-description">Description <span>(optional)</span></label>
-          <textarea
-            id="task-description"
-            name="description"
-            placeholder="Add a few helpful details"
-            maxlength="1000"
-            rows="3"
-          ></textarea>
-        </div>
-
-        <div class="task-form-options">
-          <div class="field-stack">
-            <label for="task-due-date">Due date <span>(optional)</span></label>
-            <input id="task-due-date" name="dueDate" type="date" />
-          </div>
-
-          <div class="field-stack">
-            <label for="task-priority">Priority</label>
-            <select id="task-priority" name="priority">
-              <option value="low">Low</option>
-              <option value="medium" selected>Medium</option>
-              <option value="high">High</option>
-            </select>
-          </div>
-
-          <button class="primary-button" type="submit">Add task</button>
-        </div>
-      </form>
+        <button class="primary-button add-task-button" id="add-task-button" type="button">
+          <span aria-hidden="true">+</span>
+          Add task
+        </button>
+      </div>
 
       <div class="task-toolbar">
         <div class="search-field">
-          <label class="sr-only" for="task-search">Search tasks</label>
-          <input id="task-search" type="search" placeholder="Search tasks" autocomplete="off" />
+          <label class="sr-only" for="task-search">Search current task view</label>
+          <input id="task-search" type="search" placeholder="Search this view" autocomplete="off" />
         </div>
 
-        <div class="filter-group" role="group" aria-label="Filter tasks by status">
-          <button class="filter-button is-active" type="button" data-filter="all" aria-pressed="true">All</button>
-          <button class="filter-button" type="button" data-filter="active" aria-pressed="false">Active</button>
-          <button class="filter-button" type="button" data-filter="completed" aria-pressed="false">Completed</button>
+        <div class="filter-group" role="group" aria-label="Choose task view">
+          <button class="filter-button is-active" type="button" data-view="todo" aria-pressed="true">To do <span id="todo-tab-count"></span></button>
+          <button class="filter-button" type="button" data-view="completed" aria-pressed="false">Completed <span id="completed-tab-count"></span></button>
         </div>
       </div>
 
-      <div class="task-heading">
-        <h2 id="task-list-title">Task list</h2>
-        <p id="task-count" aria-live="polite"></p>
-      </div>
-
-      <ul class="task-list" id="task-list"></ul>
+      <div class="task-groups" id="task-list"></div>
 
       <div class="empty-state" id="empty-state">
         <span aria-hidden="true">✓</span>
-        <h2 id="empty-title">No tasks yet</h2>
-        <p id="empty-message">Add your first task using the form above.</p>
+        <h2 id="empty-title">Nothing to act on</h2>
+        <p id="empty-message">Add a task or enjoy the breathing room.</p>
       </div>
     </section>
   </main>
+
+  <div class="growth-toast" id="growth-toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog class="forest-dialog" id="forest-dialog" aria-labelledby="forest-dialog-title">
+    <div class="forest-dialog-card">
+      <div class="dialog-header">
+        <div>
+          <p class="dialog-eyebrow">Your collection</p>
+          <h2 id="forest-dialog-title">My Forest</h2>
+        </div>
+        <button class="dialog-close forest-dialog-close" type="button" aria-label="Close forest">×</button>
+      </div>
+      <p class="forest-intro">Each completed tree stays here. New seeds cycle through every species before repeats begin.</p>
+      <div id="forest-content"></div>
+    </div>
+  </dialog>
 `
 
-const taskForm = document.querySelector<HTMLFormElement>('#task-form')!
-const taskInput = document.querySelector<HTMLInputElement>('#task-input')!
-const descriptionInput = document.querySelector<HTMLTextAreaElement>('#task-description')!
-const dueDateInput = document.querySelector<HTMLInputElement>('#task-due-date')!
-const priorityInput = document.querySelector<HTMLSelectElement>('#task-priority')!
+const addTaskButton = document.querySelector<HTMLButtonElement>('#add-task-button')!
 const searchInput = document.querySelector<HTMLInputElement>('#task-search')!
-const taskList = document.querySelector<HTMLUListElement>('#task-list')!
+const taskList = document.querySelector<HTMLDivElement>('#task-list')!
 const taskCount = document.querySelector<HTMLParagraphElement>('#task-count')!
 const emptyState = document.querySelector<HTMLDivElement>('#empty-state')!
 const emptyTitle = document.querySelector<HTMLHeadingElement>('#empty-title')!
 const emptyMessage = document.querySelector<HTMLParagraphElement>('#empty-message')!
-const filterButtons = Array.from(
-  document.querySelectorAll<HTMLButtonElement>('[data-filter]'),
-)
+const gardenPanel = document.querySelector<HTMLElement>('#garden-panel')!
+const growthToast = document.querySelector<HTMLDivElement>('#growth-toast')!
+const todoTabCount = document.querySelector<HTMLSpanElement>('#todo-tab-count')!
+const completedTabCount = document.querySelector<HTMLSpanElement>('#completed-tab-count')!
+const forestDialog = document.querySelector<HTMLDialogElement>('#forest-dialog')!
+const forestContent = document.querySelector<HTMLDivElement>('#forest-content')!
+const forestCloseButton = document.querySelector<HTMLButtonElement>('.forest-dialog-close')!
+const viewButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-view]'))
 
 let tasks = loadTasks()
-let editingTaskId: string | null = null
-let activeFilter: TaskFilter = 'all'
+let gameState = loadGameState()
+let activeView: TaskView = 'todo'
 let searchQuery = ''
+let toastTimer: number | undefined
+
+const initialGameUpdate = synchronizeCompletedTasks(gameState, tasks)
+gameState = initialGameUpdate.state
+saveGameState(gameState)
+
+function openForest(): void {
+  renderForest(forestContent, gameState)
+  forestDialog.showModal()
+  forestCloseButton.focus()
+}
+
+function closeForest(): void {
+  forestDialog.close()
+}
+
+function showGrowthToast(grownTrees: GrownTree[], points: number): void {
+  window.clearTimeout(toastTimer)
+
+  if (grownTrees.length > 0) {
+    const latestTree = grownTrees[grownTrees.length - 1]
+    growthToast.innerHTML = `<strong>Tree grown!</strong><span>Your ${TREE_LABELS[latestTree.species]} joined the forest. A new seed has begun.</span>`
+    growthToast.classList.add('growth-toast--celebration')
+  } else {
+    growthToast.innerHTML = `<strong>+${points} growth points</strong><span>Your tree is growing.</span>`
+    growthToast.classList.remove('growth-toast--celebration')
+  }
+
+  growthToast.hidden = false
+  requestAnimationFrame(() => growthToast.classList.add('is-visible'))
+  toastTimer = window.setTimeout(() => {
+    growthToast.classList.remove('is-visible')
+    window.setTimeout(() => {
+      growthToast.hidden = true
+    }, 220)
+  }, 3200)
+}
 
 function persistAndRender(): void {
   saveTasks(tasks)
-  renderTasks()
+  saveGameState(gameState)
+  renderApp()
 }
 
-function getLocalDateKey(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function getDueDateDisplay(dueDate: string, completed: boolean): { label: string; overdue: boolean } {
-  const today = new Date()
-  const todayKey = getLocalDateKey(today)
-  const tomorrow = new Date(today)
-  tomorrow.setDate(tomorrow.getDate() + 1)
-  const tomorrowKey = getLocalDateKey(tomorrow)
-  const overdue = !completed && dueDate < todayKey
-
-  if (dueDate === todayKey) {
-    return { label: 'Due today', overdue }
+const taskDialog = createTaskDialog(({ taskId, details }) => {
+  if (taskId === null) {
+    tasks = [createTask(details), ...tasks]
+  } else {
+    tasks = updateTask(tasks, taskId, details)
   }
 
-  if (dueDate === tomorrowKey) {
-    return { label: 'Due tomorrow', overdue }
+  persistAndRender()
+})
+
+function toggleTaskCompletion(task: Task): void {
+  const wasCompleted = task.completed
+  tasks = toggleTask(tasks, task.id)
+
+  if (wasCompleted) {
+    gameState = reopenTaskReward(gameState, task.id).state
+  } else {
+    const updatedTask = tasks.find((candidate) => candidate.id === task.id)!
+    const gameUpdate = completeTaskReward(gameState, updatedTask)
+    gameState = gameUpdate.state
+    showGrowthToast(gameUpdate.grownTrees, getRewardPoints(task.priority))
   }
 
-  const parsedDate = new Date(`${dueDate}T00:00:00`)
-  const formattedDate = new Intl.DateTimeFormat(undefined, {
-    day: 'numeric',
-    month: 'short',
-    year: parsedDate.getFullYear() === today.getFullYear() ? undefined : 'numeric',
-  }).format(parsedDate)
-
-  return { label: overdue ? `Overdue · ${formattedDate}` : `Due ${formattedDate}`, overdue }
+  persistAndRender()
 }
 
 function createTaskItem(task: Task): HTMLLIElement {
-  if (task.id === editingTaskId) {
-    return createEditTaskItem(task)
-  }
-
   const item = document.createElement('li')
   item.className = `task-item${task.completed ? ' task-item--completed' : ''}`
 
@@ -170,10 +197,7 @@ function createTaskItem(task: Task): HTMLLIElement {
   checkbox.type = 'checkbox'
   checkbox.checked = task.completed
   checkbox.setAttribute('aria-label', `Mark ${task.title} as ${task.completed ? 'active' : 'complete'}`)
-  checkbox.addEventListener('change', () => {
-    tasks = toggleTask(tasks, task.id)
-    persistAndRender()
-  })
+  checkbox.addEventListener('change', () => toggleTaskCompletion(task))
 
   const taskCopy = document.createElement('span')
   taskCopy.className = 'task-copy'
@@ -187,6 +211,7 @@ function createTaskItem(task: Task): HTMLLIElement {
     const description = document.createElement('span')
     description.className = 'task-description'
     description.textContent = task.description
+    description.title = task.description
     taskCopy.append(description)
   }
 
@@ -195,11 +220,11 @@ function createTaskItem(task: Task): HTMLLIElement {
 
   const priority = document.createElement('span')
   priority.className = `priority-badge priority-badge--${task.priority}`
-  priority.textContent = `${task.priority[0].toUpperCase()}${task.priority.slice(1)}`
+  priority.textContent = `${task.priority[0].toUpperCase()}${task.priority.slice(1)} · +${getRewardPoints(task.priority)}`
   metadata.append(priority)
 
-  if (task.dueDate !== null) {
-    const dueDateDisplay = getDueDateDisplay(task.dueDate, task.completed)
+  if (task.dueAt !== null) {
+    const dueDateDisplay = formatDueAt(task.dueAt, task.completed)
     const dueDate = document.createElement('span')
     dueDate.className = `due-date${dueDateDisplay.overdue ? ' due-date--overdue' : ''}`
     dueDate.textContent = dueDateDisplay.label
@@ -216,13 +241,9 @@ function createTaskItem(task: Task): HTMLLIElement {
   editButton.className = 'text-button'
   editButton.type = 'button'
   editButton.textContent = 'Edit'
+  editButton.dataset.editTaskId = task.id
   editButton.setAttribute('aria-label', `Edit ${task.title}`)
-  editButton.addEventListener('click', () => {
-    editingTaskId = task.id
-    renderTasks()
-    document.querySelector<HTMLInputElement>('#edit-task-title')?.focus()
-    document.querySelector<HTMLInputElement>('#edit-task-title')?.select()
-  })
+  editButton.addEventListener('click', () => taskDialog.openForEdit(task, editButton))
 
   const deleteButton = document.createElement('button')
   deleteButton.className = 'text-button text-button--danger'
@@ -240,174 +261,103 @@ function createTaskItem(task: Task): HTMLLIElement {
   return item
 }
 
-function createEditTaskItem(task: Task): HTMLLIElement {
-  const item = document.createElement('li')
-  item.className = 'task-item task-item--editing'
+function createTaskGroup(label: string, key: string, groupTasks: Task[]): HTMLElement {
+  const section = document.createElement('section')
+  section.className = `task-group task-group--${key}`
 
-  const editForm = document.createElement('form')
-  editForm.className = 'edit-form'
+  const heading = document.createElement('div')
+  heading.className = 'task-group-heading'
+  const headingTitle = document.createElement('h3')
+  headingTitle.textContent = label
+  const headingCount = document.createElement('span')
+  headingCount.textContent = String(groupTasks.length)
+  heading.append(headingTitle, headingCount)
 
-  const titleField = document.createElement('div')
-  titleField.className = 'field-stack'
-  const titleLabel = document.createElement('label')
-  titleLabel.htmlFor = 'edit-task-title'
-  titleLabel.textContent = 'Task title'
-  const titleInput = document.createElement('input')
-  titleInput.id = 'edit-task-title'
-  titleInput.type = 'text'
-  titleInput.value = task.title
-  titleInput.maxLength = 200
-  titleInput.required = true
-  titleField.append(titleLabel, titleInput)
+  const list = document.createElement('ul')
+  list.className = 'task-list'
+  list.append(...groupTasks.map(createTaskItem))
+  section.append(heading, list)
 
-  const descriptionField = document.createElement('div')
-  descriptionField.className = 'field-stack'
-  const descriptionLabel = document.createElement('label')
-  descriptionLabel.htmlFor = 'edit-task-description'
-  descriptionLabel.textContent = 'Description'
-  const description = document.createElement('textarea')
-  description.id = 'edit-task-description'
-  description.value = task.description
-  description.maxLength = 1000
-  description.rows = 3
-  descriptionField.append(descriptionLabel, description)
-
-  const options = document.createElement('div')
-  options.className = 'edit-form-options'
-
-  const dueDateField = document.createElement('div')
-  dueDateField.className = 'field-stack'
-  const dueDateLabel = document.createElement('label')
-  dueDateLabel.htmlFor = 'edit-task-due-date'
-  dueDateLabel.textContent = 'Due date'
-  const dueDate = document.createElement('input')
-  dueDate.id = 'edit-task-due-date'
-  dueDate.type = 'date'
-  dueDate.value = task.dueDate ?? ''
-  dueDateField.append(dueDateLabel, dueDate)
-
-  const priorityField = document.createElement('div')
-  priorityField.className = 'field-stack'
-  const priorityLabel = document.createElement('label')
-  priorityLabel.htmlFor = 'edit-task-priority'
-  priorityLabel.textContent = 'Priority'
-  const priority = document.createElement('select')
-  priority.id = 'edit-task-priority'
-  ;(['low', 'medium', 'high'] as TaskPriority[]).forEach((value) => {
-    const option = document.createElement('option')
-    option.value = value
-    option.textContent = `${value[0].toUpperCase()}${value.slice(1)}`
-    option.selected = task.priority === value
-    priority.append(option)
-  })
-  priorityField.append(priorityLabel, priority)
-
-  const actions = document.createElement('div')
-  actions.className = 'task-actions edit-actions'
-  const saveButton = document.createElement('button')
-  saveButton.className = 'small-button'
-  saveButton.type = 'submit'
-  saveButton.textContent = 'Save'
-  const cancelButton = document.createElement('button')
-  cancelButton.className = 'small-button small-button--secondary'
-  cancelButton.type = 'button'
-  cancelButton.textContent = 'Cancel'
-  cancelButton.addEventListener('click', () => {
-    editingTaskId = null
-    renderTasks()
-  })
-  actions.append(saveButton, cancelButton)
-
-  options.append(dueDateField, priorityField, actions)
-  editForm.append(titleField, descriptionField, options)
-  editForm.addEventListener('submit', (event) => {
-    event.preventDefault()
-    const updatedTitle = titleInput.value.trim()
-
-    if (updatedTitle === '') {
-      titleInput.focus()
-      return
-    }
-
-    tasks = updateTask(tasks, task.id, {
-      title: updatedTitle,
-      description: description.value,
-      dueDate: dueDate.value || null,
-      priority: priority.value as TaskPriority,
-    })
-    editingTaskId = null
-    persistAndRender()
-  })
-
-  item.append(editForm)
-  return item
+  return section
 }
 
 function renderTasks(): void {
-  const visibleTasks = filterTasks(tasks, activeFilter, searchQuery)
-  taskList.replaceChildren(...visibleTasks.map(createTaskItem))
-
+  const visibleTasks = filterTasks(tasks, activeView, searchQuery)
   const remainingCount = tasks.filter((task) => !task.completed).length
-  taskCount.textContent = `${visibleTasks.length} shown · ${remainingCount} remaining`
+  const completedCount = tasks.length - remainingCount
+  let groups: HTMLElement[]
+
+  if (activeView === 'todo') {
+    groups = groupActiveTasks(visibleTasks).map((group) =>
+      createTaskGroup(group.label, group.key, group.tasks),
+    )
+    taskCount.textContent = `${remainingCount} task${remainingCount === 1 ? '' : 's'} need attention`
+  } else {
+    const sortedTasks = sortCompletedTasks(visibleTasks)
+    groups = sortedTasks.length > 0 ? [createTaskGroup('Recently completed', 'completed', sortedTasks)] : []
+    taskCount.textContent = `${completedCount} task${completedCount === 1 ? '' : 's'} completed`
+  }
+
+  taskList.replaceChildren(...groups)
+  todoTabCount.textContent = String(remainingCount)
+  completedTabCount.textContent = String(completedCount)
 
   const hasVisibleTasks = visibleTasks.length > 0
   taskList.hidden = !hasVisibleTasks
   emptyState.hidden = hasVisibleTasks
 
-  if (tasks.length === 0) {
-    emptyTitle.textContent = 'No tasks yet'
-    emptyMessage.textContent = 'Add your first task using the form above.'
-  } else if (!hasVisibleTasks) {
+  if (!hasVisibleTasks && searchQuery.trim() !== '') {
     emptyTitle.textContent = 'No matching tasks'
-    emptyMessage.textContent = 'Try a different search or status filter.'
+    emptyMessage.textContent = 'Try a different search in this view.'
+  } else if (activeView === 'completed') {
+    emptyTitle.textContent = 'No completed tasks yet'
+    emptyMessage.textContent = 'Completed work will be kept here as a simple history.'
+  } else {
+    emptyTitle.textContent = 'Nothing to act on'
+    emptyMessage.textContent = tasks.length === 0 ? 'Add your first task and begin growing.' : 'You are all caught up.'
   }
 
-  filterButtons.forEach((button) => {
-    const isActive = button.dataset.filter === activeFilter
+  viewButtons.forEach((button) => {
+    const isActive = button.dataset.view === activeView
     button.classList.toggle('is-active', isActive)
     button.setAttribute('aria-pressed', String(isActive))
   })
 }
 
-taskForm.addEventListener('submit', (event) => {
-  event.preventDefault()
-  const title = taskInput.value.trim()
+function renderApp(): void {
+  renderProgressGarden(
+    gardenPanel,
+    gameState,
+    {
+      completedThisWeek: countCompletedThisWeek(tasks),
+      dueToday: countDueToday(tasks),
+    },
+    openForest,
+  )
+  renderTasks()
+}
 
-  if (title === '') {
-    taskInput.focus()
-    return
-  }
-
-  tasks = [
-    createTask({
-      title,
-      description: descriptionInput.value,
-      dueDate: dueDateInput.value || null,
-      priority: priorityInput.value as TaskPriority,
-    }),
-    ...tasks,
-  ]
-
-  taskForm.reset()
-  persistAndRender()
-  taskInput.focus()
-})
+addTaskButton.addEventListener('click', () => taskDialog.openForCreate(addTaskButton))
 
 searchInput.addEventListener('input', () => {
   searchQuery = searchInput.value
   renderTasks()
 })
 
-filterButtons.forEach((button) => {
+viewButtons.forEach((button) => {
   button.addEventListener('click', () => {
-    const filter = button.dataset.filter
+    const view = button.dataset.view
 
-    if (filter === 'all' || filter === 'active' || filter === 'completed') {
-      activeFilter = filter
-      editingTaskId = null
+    if (view === 'todo' || view === 'completed') {
+      activeView = view
       renderTasks()
     }
   })
 })
 
-renderTasks()
+forestCloseButton.addEventListener('click', closeForest)
+forestDialog.addEventListener('click', (event) => {
+  if (event.target === forestDialog) closeForest()
+})
+
+renderApp()
